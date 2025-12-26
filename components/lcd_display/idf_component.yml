@@ -1,0 +1,5 @@
+## IDF Component Manager Manifest File
+dependencies:
+  lovyan03/LovyanGFX:
+    git: https://github.com/lovyan03/LovyanGFX.git
+    version: "develop"

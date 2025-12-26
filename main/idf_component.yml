@@ -1,0 +1,8 @@
+## IDF Component Manager Manifest File
+dependencies:
+  espressif/mdns: "^1.2"
+  espressif/cjson: "^1.7"
+  ## Use LovyanGFX from the develop branch via version field
+  lovyan03/LovyanGFX:
+    git: https://github.com/lovyan03/LovyanGFX.git
+    version: "develop"

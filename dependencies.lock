@@ -1,0 +1,40 @@
+dependencies:
+  espressif/cjson:
+    component_hash: 9372811fb197926f522c467627cf4a8e72b681e0366e17879631da801103aef3
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.19
+  espressif/mdns:
+    component_hash: 29e47564b1a7ee778135e17fbbf2a2773f71c97ebabfe626c8eda7c958a7ad16
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.9.1
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+  lovyan03/LovyanGFX:
+    component_hash: 43e94edb0e07946cdd31685a5836cbfbf4cd1e5093547578f4cf4c227ee29108
+    dependencies: []
+    source:
+      git: https://github.com/lovyan03/LovyanGFX.git
+      path: .
+      type: git
+    version: 5438181440c71cf30bbdc347b0b1597ae3ebf77d
+direct_dependencies:
+- espressif/cjson
+- espressif/mdns
+- lovyan03/LovyanGFX
+manifest_hash: 7e9a6ccff4128610cca049ad5645fc7986e2fb64333d28a8f147e6c1b36b305d
+target: esp32c3
+version: 2.0.0

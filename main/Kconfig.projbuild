@@ -1,0 +1,81 @@
+menu "Cup Warmer Configuration"
+
+    menu "mDNS Configuration"
+        config MDNS_HOSTNAME
+            string "mDNS Hostname"
+            default "heated-cup"
+            help
+                Device hostname (e.g., heated-cup.local)
+    endmenu
+
+    menu "GPIO Pin Configuration"
+        config LCD_PIN_SCLK
+            int "LCD SCLK Pin"
+            default 2
+        config LCD_PIN_MOSI
+            int "LCD MOSI Pin"
+            default 3
+        config LCD_PIN_DC
+            int "LCD DC Pin"
+            default 7
+        config LCD_PIN_CS
+            int "LCD CS Pin"
+            default 8
+        config LCD_PIN_RST
+            int "LCD RST Pin"
+            default 6
+        config LCD_PIN_BL
+            int "LCD Backlight Pin"
+            default 10
+
+        config NTC_ADC_PIN
+            int "NTC ADC Pin (TODO: Confirm)"
+            default 0
+            help
+                The ADC pin connected to NTC thermistor.
+
+        config HEATER_PWM_PIN
+            int "Heater PWM Pin (TODO: Confirm)"
+            default 4
+            help
+                The PWM pin connected to heater MOSFET.
+
+        config STATUS_LED_PIN
+            int "Status LED Pin"
+            default 12
+    endmenu
+
+    menu "PID Controller Configuration"
+        config PID_KP
+            int "Proportional Gain (Kp * 100)"
+            default 200
+        config PID_KI
+            int "Integral Gain (Ki * 100)"
+            default 10
+        config PID_KD
+            int "Derivative Gain (Kd * 100)"
+            default 50
+    endmenu
+
+    menu "Temperature Limits"
+        config TEMP_MIN
+            int "Minimum Set Temperature (C)"
+            default 30
+        config TEMP_MAX
+            int "Maximum Set Temperature (C)"
+            default 90
+        config TEMP_HARD_LIMIT
+            int "Hard Safety Limit (C)"
+            default 95
+    endmenu
+
+    menu "Timer and Schedule"
+        config MAX_HEATING_TIME_MINUTES
+            int "Max Heating Duration (Minutes)"
+            default 240
+        config PREHEAT_TIME_MINUTES
+            int "Preheat Estimation (Minutes)"
+            default 5
+    endmenu
+
+endmenu
