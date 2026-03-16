@@ -9,10 +9,12 @@ idf_component_register(
         esp_netif
         esp_timer
         driver
+        button
         wifi_manager
         http_server
         soft_rtc
         temp_control
         scheduler
         lcd_display
+        voice_module
 )

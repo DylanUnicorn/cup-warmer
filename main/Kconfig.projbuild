@@ -63,10 +63,10 @@ menu "Cup Warmer Configuration"
             default 30
         config TEMP_MAX
             int "Maximum Set Temperature (C)"
-            default 90
+            default 141
         config TEMP_HARD_LIMIT
             int "Hard Safety Limit (C)"
-            default 95
+            default 150
     endmenu
 
     menu "Timer and Schedule"

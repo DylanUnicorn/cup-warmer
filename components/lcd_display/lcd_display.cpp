@@ -130,6 +130,7 @@ static MenuItem menuItems[] = {
     {"喝水提醒", "间隔提醒"},
 };
 static const int menuCount = sizeof(menuItems) / sizeof(menuItems[0]);
+static int s_menu_index = 0; // 当前菜单选中索引
 
 // ============================================================================
 // 辅助绘图函数
@@ -231,6 +232,9 @@ void lcd_display_update_main(float current_temp, int target_temp,
   rtc_time_t rtc_time;
   soft_rtc_get_time(&rtc_time);
 
+  // 获取预估水温
+  float water_temp = temp_control_get_water_temp_estimate();
+
   // 清屏
   sprite.fillScreen(0x0000);
 
@@ -251,8 +255,14 @@ void lcd_display_update_main(float current_temp, int target_temp,
   sprite.fillCircle(120, 5, 2, wifi_connected ? 0x07E0 : 0xF800);
 
   // ==========================================
-  // 核心温度显示
+  // 面板温度显示（大字体）
   // ==========================================
+  // 标签
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextDatum(textdatum_t::top_left);
+  sprite.setTextColor(0x07FF);
+  sprite.drawString("Panel", 5, 16);
+
   char temp_str[10];
   snprintf(temp_str, sizeof(temp_str), "%.1f", current_temp);
 
@@ -261,47 +271,96 @@ void lcd_display_update_main(float current_temp, int target_temp,
 
   // 发光阴影效果
   sprite.setTextColor(0x212F);
-  sprite.drawString(temp_str, 64 + 2, 50 + 2);
+  sprite.drawString(temp_str, 64 + 2, 46 + 2);
 
   // 主文字
   sprite.setTextColor(0xFFFF);
-  sprite.drawString(temp_str, 64, 50);
+  sprite.drawString(temp_str, 64, 46);
 
   // 单位 °C
   sprite.setFont(&fonts::Font2);
-  sprite.drawString("C", 115, 40);
-  sprite.drawCircle(108, 35, 2, 0xFFFF);
+  sprite.drawString("C", 115, 36);
+  sprite.drawCircle(108, 31, 2, 0xFFFF);
 
   // ==========================================
-  // 温度进度条
+  // 面板温度进度条 + 目标值
   // ==========================================
   sprite.setFont(&fonts::Font0);
   sprite.setTextDatum(textdatum_t::top_left);
   sprite.setTextColor(0xBDF7);
-  sprite.drawString("Temp:", 10, 85);
-  sprite.setCursor(100, 85);
+  sprite.drawString("Set:", 10, 70);
+  sprite.setCursor(100, 70);
   sprite.print(target_temp);
 
-  // 进度条 (青色)
-  int progress = (int)((current_temp / target_temp) * 100);
+  // 进度条 (青色) - 基于室温(25°C)到目标温度的进度
+  int progress = 0;
+  float baseline = 25.0f;
+  if (target_temp > baseline) {
+    progress = (int)(((current_temp - baseline) / (target_temp - baseline)) * 100);
+  }
   if (progress > 100)
     progress = 100;
-  drawProgressBar(10, 95, 108, 8, progress, 100, 0x07FF);
+  if (progress < 0)
+    progress = 0;
+  drawProgressBar(10, 80, 108, 6, progress, 100, 0x07FF);
+
+  // ==========================================
+  // 预估水温显示
+  // ==========================================
+  sprite.setFont(&fonts::efontCN_14);
+  sprite.setTextDatum(textdatum_t::top_left);
+  sprite.setTextColor(0x07E0);
+  sprite.setCursor(5, 92);
+
+  char water_str[30];
+  snprintf(water_str, sizeof(water_str), "水温: ~%.0f°C", water_temp);
+  sprite.print(water_str);
+
+  // 预估水温目标 (不超过100°C)
+  sprite.setTextColor(0x73AE);
+  sprite.setFont(&fonts::Font0);
+  sprite.setCursor(80, 95);
+  int water_target = target_temp - 30;
+  if (water_target > 100) water_target = 100;
+  if (water_target < 0) water_target = 0;
+  char water_target_str[20];
+  snprintf(water_target_str, sizeof(water_target_str), "(~%d)", water_target);
+  sprite.print(water_target_str);
 
   // ==========================================
   // 加热状态
   // ==========================================
   sprite.setFont(&fonts::efontCN_14);
   sprite.setTextColor(0xFFFF);
-  sprite.setCursor(5, 135);
+  sprite.setTextDatum(textdatum_t::top_left);
+  sprite.setCursor(5, 115);
 
-  if (is_heating) {
+  bool power_on = temp_control_get_power();
+  if (!power_on) {
+    sprite.setTextColor(0x73AE);
+    sprite.print("已关闭");
+  } else if (is_heating) {
+    sprite.setTextColor(0xFBE0);
     sprite.print("加热中...");
   } else if (current_temp >= target_temp - 2) {
+    sprite.setTextColor(0x07E0);
     sprite.print("保温中");
   } else {
+    sprite.setTextColor(0xBDF7);
     sprite.print("待机");
   }
+
+  // ==========================================
+  // 底部操作提示
+  // ==========================================
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextColor(0x4208);
+  sprite.setTextDatum(textdatum_t::bottom_left);
+  sprite.drawString("NAV:Temp", 2, 158);
+  sprite.setTextDatum(textdatum_t::bottom_center);
+  sprite.drawString("OK:Menu", 64, 158);
+  sprite.setTextDatum(textdatum_t::bottom_right);
+  sprite.drawString("BACK:On/Off", 126, 158);
 
   // 推送到屏幕
   sprite.pushSprite(0, 0);
@@ -369,5 +428,247 @@ void lcd_display_show_splash(void) {
 ui_screen_t lcd_display_get_current_screen(void) { return s_current_screen; }
 
 void lcd_display_set_screen(ui_screen_t screen) { s_current_screen = screen; }
+
+// ============================================================================
+// 菜单导航函数
+// ============================================================================
+
+void lcd_display_menu_next(void) {
+  s_menu_index = (s_menu_index + 1) % menuCount;
+}
+
+void lcd_display_menu_prev(void) {
+  s_menu_index = (s_menu_index - 1 + menuCount) % menuCount;
+}
+
+int lcd_display_get_menu_index(void) {
+  return s_menu_index;
+}
+
+// ============================================================================
+// 新增UI界面显示函数
+// ============================================================================
+
+/**
+ * @brief 显示定时加热界面
+ * @param minutes 定时时长(分钟)
+ * @param is_editing 是否处于编辑状态
+ */
+void lcd_display_show_timer(int minutes, bool is_editing) {
+  s_current_screen = UI_SCREEN_TIMER;
+  
+  sprite.fillScreen(0x0000);
+  
+  // 标题
+  sprite.setTextColor(0x07FF);
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextDatum(textdatum_t::top_center);
+  sprite.drawString("- TIMER MODE -", 64, 5);
+  
+  // 主标题
+  sprite.setFont(&fonts::efontCN_16);
+  sprite.setTextColor(0xFFFF);
+  sprite.drawString("定时加热", 64, 30);
+  
+  // 时长显示（中号字体）
+  char time_str[20];
+  snprintf(time_str, sizeof(time_str), "%d min", minutes);
+  
+  sprite.setFont(SMALL_FONT);
+  if (is_editing) {
+    // 编辑状态：黄色高亮
+    sprite.setTextColor(0xFFE0);
+    sprite.drawString(time_str, 64, 80);
+    // 下划线
+    sprite.fillRect(30, 95, 68, 2, 0xFFE0);
+  } else {
+    sprite.setTextColor(0xFFFF);
+    sprite.drawString(time_str, 64, 80);
+  }
+  
+  // 提示信息
+  sprite.setFont(&fonts::efontCN_14);
+  sprite.setTextColor(0x73AE);
+  sprite.drawString("可选: 15/30/60/120", 64, 120);
+  
+  // 操作提示
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextColor(0xBDF7);
+  sprite.setTextDatum(textdatum_t::bottom_left);
+  sprite.drawString("NAV:Change", 5, 155);
+  sprite.setTextDatum(textdatum_t::bottom_right);
+  sprite.drawString("CONF:OK", 123, 155);
+  
+  sprite.pushSprite(0, 0);
+}
+
+/**
+ * @brief 显示预约加热界面
+ * @param hour 小时
+ * @param minute 分钟
+ * @param is_editing 是否处于编辑状态
+ * @param edit_field 0=小时, 1=分钟
+ */
+void lcd_display_show_schedule(int hour, int minute, bool is_editing, int edit_field) {
+  s_current_screen = UI_SCREEN_SCHEDULE;
+  
+  sprite.fillScreen(0x0000);
+  
+  // 标题
+  sprite.setTextColor(0x07E0);
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextDatum(textdatum_t::top_center);
+  sprite.drawString("- SCHEDULE MODE -", 64, 5);
+  
+  // 主标题
+  sprite.setFont(&fonts::efontCN_16);
+  sprite.setTextColor(0xFFFF);
+  sprite.drawString("预约加热", 64, 30);
+  
+  // 时钟图标（表盘）
+  sprite.drawCircle(64, 65, 25, 0x4208);
+  sprite.drawCircle(64, 65, 26, 0x4208);
+  
+  // 刻度点（12点、3点、6点、9点）
+  sprite.fillCircle(64, 40, 2, 0x4208);  // 12点
+  sprite.fillCircle(89, 65, 2, 0x4208);  // 3点
+  sprite.fillCircle(64, 90, 2, 0x4208);  // 6点
+  sprite.fillCircle(39, 65, 2, 0x4208);  // 9点
+  
+  // 时针（短粗）
+  float hour_angle = (hour % 12) * 30 + minute * 0.5;
+  float hour_rad = hour_angle * 3.14159 / 180.0;
+  int hour_x = 64 + (int)(12 * sin(hour_rad));
+  int hour_y = 65 - (int)(12 * cos(hour_rad));
+  sprite.drawLine(64, 65, hour_x, hour_y, 0x07E0);      // 中心线
+  sprite.drawLine(64-1, 65, hour_x-1, hour_y, 0x07E0);  // 左侧线（加粗）
+  sprite.drawLine(64+1, 65, hour_x+1, hour_y, 0x07E0);  // 右侧线（加粗）
+  
+  // 分针（长细）
+  float min_angle = minute * 6;
+  float min_rad = min_angle * 3.14159 / 180.0;
+  int min_x = 64 + (int)(20 * sin(min_rad));
+  int min_y = 65 - (int)(20 * cos(min_rad));
+  sprite.drawLine(64, 65, min_x, min_y, 0xFFFF);
+  
+  // 中心点
+  sprite.fillCircle(64, 65, 2, 0xFFE0);
+  
+  // 时间显示
+  char time_str[10];
+  snprintf(time_str, sizeof(time_str), "%02d:%02d", hour, minute);
+  
+  sprite.setFont(BIG_FONT);
+  sprite.setTextDatum(textdatum_t::middle_center);
+  
+  if (is_editing) {
+    // 小时部分
+    if (edit_field == 0) {
+      sprite.setTextColor(0xFFE0); // 编辑时高亮
+    } else {
+      sprite.setTextColor(0xBDF7);
+    }
+    char hour_str[4];
+    snprintf(hour_str, sizeof(hour_str), "%02d", hour);
+    sprite.drawString(hour_str, 40, 110);
+    
+    // 冒号
+    sprite.setTextColor(0xFFFF);
+    sprite.drawString(":", 64, 110);
+    
+    // 分钟部分
+    if (edit_field == 1) {
+      sprite.setTextColor(0xFFE0);
+    } else {
+      sprite.setTextColor(0xBDF7);
+    }
+    char min_str[4];
+    snprintf(min_str, sizeof(min_str), "%02d", minute);
+    sprite.drawString(min_str, 88, 110);
+  } else {
+    sprite.setTextColor(0xFFFF);
+    sprite.drawString(time_str, 64, 110);
+  }
+  
+  // 操作提示
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextColor(0xBDF7);
+  sprite.setTextDatum(textdatum_t::bottom_left);
+  sprite.drawString("NAV:+/-", 5, 155);
+  sprite.setTextDatum(textdatum_t::bottom_right);
+  sprite.drawString("CONF:Next", 123, 155);
+  
+  sprite.pushSprite(0, 0);
+}
+
+/**
+ * @brief 显示喝水提醒界面
+ * @param interval_minutes 提醒间隔(分钟)
+ * @param enabled 是否开启
+ * @param is_editing 是否处于编辑状态
+ */
+void lcd_display_show_reminder(int interval_minutes, bool enabled, bool is_editing) {
+  s_current_screen = UI_SCREEN_REMINDER;
+  
+  sprite.fillScreen(0x0000);
+  
+  // 标题
+  sprite.setTextColor(0x07FF);
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextDatum(textdatum_t::top_center);
+  sprite.drawString("- REMINDER MODE -", 64, 5);
+  
+  // 主标题
+  sprite.setFont(&fonts::efontCN_16);
+  sprite.setTextColor(0xFFFF);
+  sprite.drawString("喝水提醒", 64, 30);
+  
+  // 水杯图标（简单矩形+波浪）
+  sprite.drawRoundRect(52, 55, 24, 30, 4, enabled ? 0x07FF : 0x4208);
+  if (enabled) {
+    sprite.fillRect(54, 70, 20, 13, 0x07FF);
+    // 波浪线
+    for (int i = 0; i < 20; i += 4) {
+      sprite.drawPixel(54 + i, 69, 0x0000);
+      sprite.drawPixel(54 + i + 2, 70, 0x0000);
+    }
+  }
+  
+  // 状态显示
+  sprite.setFont(BIG_FONT);
+  sprite.setTextDatum(textdatum_t::middle_center);
+  
+  if (is_editing) {
+    sprite.setTextColor(0xFFE0);
+  } else {
+    sprite.setTextColor(enabled ? 0x07E0 : 0xF800);
+  }
+  
+  sprite.drawString(enabled ? "ON" : "OFF", 64, 105);
+  
+  // 间隔时间
+  if (enabled) {
+    sprite.setFont(&fonts::efontCN_16);
+    sprite.setTextColor(0xBDF7);
+    
+    char interval_str[30];
+    snprintf(interval_str, sizeof(interval_str), "每 %d 分钟提醒", interval_minutes);
+    sprite.drawString(interval_str, 64, 130);
+  } else {
+    sprite.setFont(&fonts::efontCN_14);
+    sprite.setTextColor(0x73AE);
+    sprite.drawString("提醒已关闭", 64, 130);
+  }
+  
+  // 操作提示
+  sprite.setFont(&fonts::Font0);
+  sprite.setTextColor(0xBDF7);
+  sprite.setTextDatum(textdatum_t::bottom_left);
+  sprite.drawString("NAV:Toggle", 5, 155);
+  sprite.setTextDatum(textdatum_t::bottom_right);
+  sprite.drawString("CONF:Save", 123, 155);
+  
+  sprite.pushSprite(0, 0);
+}
 
 } // extern "C"

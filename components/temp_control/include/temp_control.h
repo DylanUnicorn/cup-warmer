@@ -99,6 +99,15 @@ temp_state_t temp_control_get_state(void);
  */
 bool temp_control_is_sensor_ok(void);
 
+/**
+ * @brief 获取预估水温
+ *
+ * 根据面板温度减去偏移量估算水温
+ *
+ * @return float 预估水温 (°C)
+ */
+float temp_control_get_water_temp_estimate(void);
+
 #ifdef __cplusplus
 }
 #endif

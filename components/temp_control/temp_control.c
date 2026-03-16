@@ -1,14 +1,12 @@
 /**
  * @file temp_control.c
- * @brief 温控模块实现 - NTC温度读取 + PID控温 + 加热器PWM控制
+ * @brief 温控模块实现 - NTC温度读取 + 简单开关控制
  */
 
 #include "temp_control.h"
-#include "pid.h"
 #include "sdkconfig.h"
 
 #include "driver/gpio.h"
-#include "driver/ledc.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
@@ -25,53 +23,39 @@ static const char *TAG = "TempControl";
 // 【TODO: 请根据实际硬件修改以下引脚配置】
 // ============================================================================
 
-// NTC传感器ADC配置
-// 【注意】请在 menuconfig 中配置 NTC_ADC_PIN，或直接修改此处
-#ifndef CONFIG_NTC_ADC_PIN
-#define CONFIG_NTC_ADC_PIN 0
-#endif
+// NTC传感器ADC配置 - NTCGS163JF103FT8
+#define NTC_ADC_GPIO 0            // GPIO0 用于NTC温度采集
 #define NTC_ADC_CHANNEL ADC_CHANNEL_0 // GPIO0 对应 ADC1_CH0
 
-// 加热器PWM配置
-// 【注意】请在 menuconfig 中配置 HEATER_PWM_PIN，或直接修改此处
-#ifndef CONFIG_HEATER_PWM_PIN
-#define CONFIG_HEATER_PWM_PIN 4
-#endif
-#define HEATER_GPIO CONFIG_HEATER_PWM_PIN
-#define HEATER_LEDC_TIMER LEDC_TIMER_0
-#define HEATER_LEDC_CHANNEL LEDC_CHANNEL_0
-#define HEATER_PWM_FREQ 1000              // 1kHz PWM频率
-#define HEATER_PWM_BITS LEDC_TIMER_10_BIT // 10位分辨率 (0-1023)
+// 加热器控制配置
+#define HEATER_GPIO 12  // GPIO12 控制加热膜
 
 // ============================================================================
-// NTC热敏电阻参数 (根据实际NTC调整)
+// NTC热敏电阻参数 - NTCGS163JF103FT8
 // ============================================================================
-#define NTC_BETA 3950.0f      // B值
-#define NTC_R25 10000.0f      // 25°C时的电阻值 (10k)
-#define NTC_SERIES_R 10000.0f // 分压电阻值 (10k)
-#define NTC_VREF_MV 3300.0f   // 参考电压 (mV)
+#define NTC_BETA 3435.0f      // B值 (规格书参数)
+#define NTC_R0 10000.0f       // 25°C时的标称电阻值 (10kΩ)
+#define NTC_T0_KELVIN 298.15f // 25°C = 298.15K
+#define NTC_R1 10000.0f       // 上拉电阻值 (10kΩ)
+#define NTC_VREF_MV 3300.0f   // 参考电压 (3.3V)
+#define ADC_MAX_VALUE 4095.0f // 12bit ADC (0-4095)
 
 // 温度限制
 #ifndef CONFIG_TEMP_MIN
 #define CONFIG_TEMP_MIN 30
 #endif
 #ifndef CONFIG_TEMP_MAX
-#define CONFIG_TEMP_MAX 90
+#define CONFIG_TEMP_MAX 141
 #endif
 #ifndef CONFIG_TEMP_HARD_LIMIT
-#define CONFIG_TEMP_HARD_LIMIT 95
+#define CONFIG_TEMP_HARD_LIMIT 150
 #endif
 
-// PID参数 (从Kconfig读取，除以100得到实际值)
-#ifndef CONFIG_PID_KP
-#define CONFIG_PID_KP 200
-#endif
-#ifndef CONFIG_PID_KI
-#define CONFIG_PID_KI 10
-#endif
-#ifndef CONFIG_PID_KD
-#define CONFIG_PID_KD 50
-#endif
+// 恒温控制参数 - 滞环带宽 (±HYSTERESIS °C)
+#define TEMP_HYSTERESIS 2.5f
+
+// 面板温度到水温的估算偏移量
+#define WATER_TEMP_OFFSET 30.0f
 
 // ============================================================================
 // 静态变量
@@ -80,10 +64,8 @@ static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_adc_cali_handle = NULL;
 static bool s_cali_enabled = false;
 
-static pid_controller_t s_pid;
-
-static bool s_power_on = false;
-static int s_target_temp = 55;       // 默认目标温度
+static bool s_power_on = true;  // 默认开启温控
+static int s_target_temp = 80;       // 默认目标面板温度
 static float s_current_temp = 25.0f; // 当前温度
 static bool s_is_heating = false;
 static temp_state_t s_state = TEMP_STATE_IDLE;
@@ -138,53 +120,42 @@ static esp_err_t adc_init(void) {
 }
 
 // ============================================================================
-// PWM 初始化
+// 加热器GPIO初始化（直接开关控制，非PWM）
 // ============================================================================
-static esp_err_t pwm_init(void) {
-  // 配置LEDC定时器
-  ledc_timer_config_t timer_cfg = {
-      .speed_mode = LEDC_LOW_SPEED_MODE,
-      .timer_num = HEATER_LEDC_TIMER,
-      .duty_resolution = HEATER_PWM_BITS,
-      .freq_hz = HEATER_PWM_FREQ,
-      .clk_cfg = LEDC_AUTO_CLK,
+static esp_err_t heater_gpio_init(void) {
+  gpio_config_t io_conf = {
+    .pin_bit_mask = (1ULL << HEATER_GPIO),
+    .mode = GPIO_MODE_OUTPUT,
+    .pull_up_en = GPIO_PULLUP_DISABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_DISABLE
   };
-  ESP_ERROR_CHECK(ledc_timer_config(&timer_cfg));
-
-  // 配置LEDC通道
-  ledc_channel_config_t channel_cfg = {
-      .speed_mode = LEDC_LOW_SPEED_MODE,
-      .channel = HEATER_LEDC_CHANNEL,
-      .timer_sel = HEATER_LEDC_TIMER,
-      .intr_type = LEDC_INTR_DISABLE,
-      .gpio_num = HEATER_GPIO,
-      .duty = 0,
-      .hpoint = 0,
-  };
-  ESP_ERROR_CHECK(ledc_channel_config(&channel_cfg));
-
-  ESP_LOGI(TAG, "Heater PWM initialized on GPIO%d", HEATER_GPIO);
+  
+  esp_err_t ret = gpio_config(&io_conf);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Heater GPIO config failed");
+    return ret;
+  }
+  
+  gpio_set_level(HEATER_GPIO, 0); // 初始状态关闭
+  ESP_LOGI(TAG, "Heater GPIO initialized on GPIO%d (initial: OFF)", HEATER_GPIO);
   return ESP_OK;
 }
 
 // ============================================================================
-// 设置加热器PWM占空比
+// 设置加热器状态（开/关）
 // ============================================================================
-static void set_heater_duty(float duty_percent) {
-  if (duty_percent < 0)
-    duty_percent = 0;
-  if (duty_percent > 100)
-    duty_percent = 100;
-
-  // 10位分辨率: 0-1023
-  uint32_t duty = (uint32_t)(duty_percent * 10.23f);
-  ledc_set_duty(LEDC_LOW_SPEED_MODE, HEATER_LEDC_CHANNEL, duty);
-  ledc_update_duty(LEDC_LOW_SPEED_MODE, HEATER_LEDC_CHANNEL);
+static void set_heater_state(bool on) {
+  gpio_set_level(HEATER_GPIO, on ? 1 : 0);
+  ESP_LOGD(TAG, "Heater: %s", on ? "ON" : "OFF");
 }
 
 // ============================================================================
-// 读取NTC温度
+// 读取NTC温度 - 使用Steinhart-Hart公式（B值法）
+// 返回温度值，并通过全局变量输出电阻值
 // ============================================================================
+static float s_last_r_ntc = 0.0f; // 全局变量存储最后一次的电阻值
+
 static float read_ntc_temperature(void) {
   int adc_raw = 0;
   int voltage_mv = 0;
@@ -197,34 +168,47 @@ static float read_ntc_temperature(void) {
     return -999.0f;
   }
 
-  // 转换为电压
+  // 转换为电压（mV）
   if (s_cali_enabled) {
     adc_cali_raw_to_voltage(s_adc_cali_handle, adc_raw, &voltage_mv);
   } else {
-    // 简单线性估算
-    voltage_mv = (adc_raw * 3300) / 4095;
+    // 简单线性估算: V_out = (ADC_Value / 4095) * 3300
+    voltage_mv = (int)((float)adc_raw * NTC_VREF_MV / ADC_MAX_VALUE);
   }
 
   // 检查电压范围 (传感器异常检测)
   if (voltage_mv < 100 || voltage_mv > 3200) {
-    ESP_LOGW(TAG, "NTC voltage out of range: %d mV", voltage_mv);
+    ESP_LOGW(TAG, "NTC voltage out of range: %d mV (ADC=%d)", voltage_mv, adc_raw);
     s_sensor_ok = false;
     return -999.0f;
   }
   s_sensor_ok = true;
 
-  // 计算NTC电阻值 (分压公式: V_ntc = Vref * R_ntc / (R_series + R_ntc))
-  // R_ntc = R_series * V_ntc / (Vref - V_ntc)
-  float v_ntc = (float)voltage_mv;
-  float r_ntc = NTC_SERIES_R * v_ntc / (NTC_VREF_MV - v_ntc);
+  // 步骤1: 从电压计算NTC电阻值
+  // 分压公式: V_out = 3.3V * R_ntc / (R1 + R_ntc)
+  // 反推: R_ntc = (V_out * R1) / (3.3V - V_out)
+  float v_out = (float)voltage_mv;
+  float r_ntc = (v_out * NTC_R1) / (NTC_VREF_MV - v_out);
+  
+  // 保存电阻值供外部访问
+  s_last_r_ntc = r_ntc;
 
-  // 使用B值公式计算温度
-  // 1/T = 1/T25 + (1/B) * ln(R/R25)
-  // T = 1 / (1/T25 + (1/B) * ln(R/R25)) - 273.15
-  float t25_kelvin = 25.0f + 273.15f;
-  float temp_kelvin =
-      1.0f / (1.0f / t25_kelvin + (1.0f / NTC_BETA) * logf(r_ntc / NTC_R25));
+  // 步骤2: 使用Steinhart-Hart公式（B值法）计算温度
+  // T = 1 / (1/T0 + (1/B) * ln(R_ntc/R0))
+  // 其中: T0=298.15K, B=3435K, R0=10kΩ
+  float temp_kelvin = 1.0f / (
+    (1.0f / NTC_T0_KELVIN) + 
+    (1.0f / NTC_BETA) * logf(r_ntc / NTC_R0)
+  );
   float temp_celsius = temp_kelvin - 273.15f;
+
+  // 详细日志（便于调试温度计算）
+  ESP_LOGI(TAG, "========================================");
+  ESP_LOGI(TAG, "[NTC Debug] ADC Raw Value: %d", adc_raw);
+  ESP_LOGI(TAG, "[NTC Debug] Voltage (V_out): %.2f mV", v_out);
+  ESP_LOGI(TAG, "[NTC Debug] Resistance (R_ntc): %.0f Ω (%.2f kΩ)", r_ntc, r_ntc/1000.0f);
+  ESP_LOGI(TAG, "[NTC Debug] Temperature: %.2f °C", temp_celsius);
+  ESP_LOGI(TAG, "========================================");
 
   return temp_celsius;
 }
@@ -253,7 +237,7 @@ static void temp_control_task(void *arg) {
       s_power_on = false;
       s_is_heating = false;
       s_state = TEMP_STATE_IDLE;
-      set_heater_duty(0);
+      set_heater_state(false);
       xSemaphoreGive(s_mutex);
       vTaskDelayUntil(&last_wake_time, period);
       continue;
@@ -264,34 +248,44 @@ static void temp_control_task(void *arg) {
       ESP_LOGE(TAG, "SAFETY: NTC sensor error, stopping heater!");
       s_is_heating = false;
       s_state = TEMP_STATE_ERROR;
-      set_heater_duty(0);
+      set_heater_state(false);
       xSemaphoreGive(s_mutex);
       vTaskDelayUntil(&last_wake_time, period);
       continue;
     }
 
-    // 正常温控逻辑
+    // 温控逻辑：基于用户设定的面板目标温度，滞环控制
     if (s_power_on) {
-      // 设置PID目标
-      pid_set_setpoint(&s_pid, (float)s_target_temp);
+      float target_low  = (float)s_target_temp - TEMP_HYSTERESIS;
+      float target_high = (float)s_target_temp + TEMP_HYSTERESIS;
 
-      // 计算PID输出 (0-100%)
-      float output = pid_compute(&s_pid, s_current_temp);
-
-      // 设置加热器PWM
-      set_heater_duty(output);
-
-      s_is_heating = (output > 5.0f); // 输出>5%认为在加热
-      s_state = s_is_heating ? TEMP_STATE_HEATING : TEMP_STATE_KEEPING;
-
-      ESP_LOGD(TAG, "Temp: %.1f -> %d, PID output: %.1f%%", s_current_temp,
-               s_target_temp, output);
+      if (s_current_temp < target_low) {
+        // 温度低于目标下限，开启加热
+        set_heater_state(true);
+        s_is_heating = true;
+        s_state = TEMP_STATE_HEATING;
+        ESP_LOGI(TAG, "[Heating] Panel: %.1f°C < %.1f°C (target=%d) | Water: ~%.0f°C | R_ntc: %.0fΩ", 
+                 s_current_temp, target_low, s_target_temp,
+                 s_current_temp - WATER_TEMP_OFFSET, s_last_r_ntc);
+      } else if (s_current_temp >= target_high) {
+        // 温度达到目标上限，关闭加热
+        set_heater_state(false);
+        s_is_heating = false;
+        s_state = TEMP_STATE_KEEPING;
+        ESP_LOGI(TAG, "[Keeping] Panel: %.1f°C >= %.1f°C (target=%d) | Water: ~%.0f°C | R_ntc: %.0fΩ", 
+                 s_current_temp, target_high, s_target_temp,
+                 s_current_temp - WATER_TEMP_OFFSET, s_last_r_ntc);
+      } else {
+        // 在死区范围内，保持当前状态
+        ESP_LOGD(TAG, "[Stable] Panel: %.1f°C (%.1f-%.1f) target=%d | Heater: %s | R_ntc: %.0fΩ", 
+                 s_current_temp, target_low, target_high, s_target_temp,
+                 s_is_heating ? "ON" : "OFF", s_last_r_ntc);
+      }
     } else {
       // 电源关闭
-      set_heater_duty(0);
+      set_heater_state(false);
       s_is_heating = false;
       s_state = TEMP_STATE_IDLE;
-      pid_reset(&s_pid);
     }
 
     xSemaphoreGive(s_mutex);
@@ -313,28 +307,26 @@ esp_err_t temp_control_init(void) {
   // 初始化ADC
   esp_err_t err = adc_init();
   if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ADC init failed!");
     return err;
   }
 
-  // 初始化PWM
-  err = pwm_init();
+  // 初始化加热器GPIO
+  err = heater_gpio_init();
   if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Heater GPIO init failed!");
     return err;
   }
 
-  // 初始化PID控制器 (参数从Kconfig读取，除以100)
-  float kp = (float)CONFIG_PID_KP / 100.0f;
-  float ki = (float)CONFIG_PID_KI / 100.0f;
-  float kd = (float)CONFIG_PID_KD / 100.0f;
-
-  pid_init(&s_pid, kp, ki, kd);
-  pid_set_output_limits(&s_pid, 0, 100); // 输出0-100%
-
-  ESP_LOGI(TAG, "Temp control initialized. PID: Kp=%.2f, Ki=%.2f, Kd=%.2f", kp,
-           ki, kd);
-  ESP_LOGI(TAG, "NTC ADC on GPIO%d (TODO: verify pin)", CONFIG_NTC_ADC_PIN);
-  ESP_LOGI(TAG, "Heater PWM on GPIO%d (TODO: verify pin)",
-           CONFIG_HEATER_PWM_PIN);
+  ESP_LOGI(TAG, "==========================================");
+  ESP_LOGI(TAG, "  Temperature Control Initialized");
+  ESP_LOGI(TAG, "  NTC Sensor: GPIO%d (ADC1_CH%d)", NTC_ADC_GPIO, NTC_ADC_CHANNEL);
+  ESP_LOGI(TAG, "  Heater Control: GPIO%d (ENABLED)", HEATER_GPIO);
+  ESP_LOGI(TAG, "  NTC Model: NTCGS163JF103FT8");
+  ESP_LOGI(TAG, "  Parameters: R0=10kΩ, B=3435K, R1=10kΩ");
+  ESP_LOGI(TAG, "  ⚙️ Target Panel Temp: %d°C (±%.1f°C hysteresis)", s_target_temp, TEMP_HYSTERESIS);
+  ESP_LOGI(TAG, "  🔥 Auto-start heating enabled, max=%d°C", CONFIG_TEMP_MAX);
+  ESP_LOGI(TAG, "==========================================");
 
   return ESP_OK;
 }
@@ -348,11 +340,10 @@ void temp_control_set_power(bool on) {
   xSemaphoreTake(s_mutex, portMAX_DELAY);
   s_power_on = on;
   if (!on) {
-    set_heater_duty(0);
-    pid_reset(&s_pid);
+    set_heater_state(false);
   }
   xSemaphoreGive(s_mutex);
-  ESP_LOGI(TAG, "Power %s", on ? "ON" : "OFF");
+  ESP_LOGI(TAG, "Temperature Control Power: %s", on ? "ON" : "OFF");
 }
 
 bool temp_control_get_power(void) { return s_power_on; }
@@ -379,3 +370,11 @@ bool temp_control_is_heating(void) { return s_is_heating; }
 temp_state_t temp_control_get_state(void) { return s_state; }
 
 bool temp_control_is_sensor_ok(void) { return s_sensor_ok; }
+
+float temp_control_get_water_temp_estimate(void) {
+  float panel_temp = s_current_temp;
+  float water_temp = panel_temp - WATER_TEMP_OFFSET;
+  if (water_temp < 0.0f) water_temp = 0.0f;
+  if (water_temp > 100.0f) water_temp = 100.0f;
+  return water_temp;
+}

@@ -18,9 +18,12 @@ extern "C" {
  * @brief 显示UI界面类型
  */
 typedef enum {
-  UI_SCREEN_MAIN,   // 主界面 (温度+时间)
-  UI_SCREEN_MENU,   // 菜单界面
-  UI_SCREEN_CONFIG, // 配网提示界面
+  UI_SCREEN_MAIN,      // 主界面 (温度+时间)
+  UI_SCREEN_MENU,      // 菜单界面
+  UI_SCREEN_CONFIG,    // 配网提示界面
+  UI_SCREEN_TIMER,     // 定时加热界面
+  UI_SCREEN_SCHEDULE,  // 预约加热界面
+  UI_SCREEN_REMINDER,  // 喝水提醒界面
 } ui_screen_t;
 
 /**
@@ -80,6 +83,45 @@ ui_screen_t lcd_display_get_current_screen(void);
  * @param screen 目标界面
  */
 void lcd_display_set_screen(ui_screen_t screen);
+
+/**
+ * @brief 菜单导航向下
+ */
+void lcd_display_menu_next(void);
+
+/**
+ * @brief 获取当前菜单索引
+ *
+ * @return int 菜单项索引
+ */
+int lcd_display_get_menu_index(void);
+
+/**
+ * @brief 显示定时加热界面
+ *
+ * @param minutes 定时时长（分钟）
+ * @param is_editing 是否处于编辑状态
+ */
+void lcd_display_show_timer(int minutes, bool is_editing);
+
+/**
+ * @brief 显示预约加热界面
+ *
+ * @param hour 小时
+ * @param minute 分钟
+ * @param is_editing 是否处于编辑状态
+ * @param edit_field 编辑字段 (0=hour, 1=minute)
+ */
+void lcd_display_show_schedule(int hour, int minute, bool is_editing, int edit_field);
+
+/**
+ * @brief 显示喝水提醒界面
+ *
+ * @param interval_minutes 提醒间隔（分钟）
+ * @param enabled 是否启用
+ * @param is_editing 是否处于编辑状态
+ */
+void lcd_display_show_reminder(int interval_minutes, bool enabled, bool is_editing);
 
 #ifdef __cplusplus
 }
