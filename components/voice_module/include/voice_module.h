@@ -16,9 +16,9 @@ extern "C" {
 #endif
 
 /**
- * @brief 初始化语音模块 (IO 触发模式)
+ * @brief 初始化语音模块 (4路 IO 触发模式)
  *
- * 配置 GPIO1 为输出，默认高电平（空闲）
+ * 配置 GPIO1/18/19 为输出，默认高电平（空闲）
  *
  * @return esp_err_t ESP_OK 成功
  */
@@ -28,7 +28,6 @@ esp_err_t voice_module_init(void);
  * @brief 触发播放第 N 个音频
  *
  * 拉低对应 IO 引脚约 100ms 触发 CH7800 播放
- * 当前仅支持 IO1 (播放 001.mp3)
  *
  * @param track_num 音频编号 (1-4)
  */

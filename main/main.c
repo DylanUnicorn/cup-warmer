@@ -17,6 +17,7 @@
 #include "nvs_flash.h"
 #include <stdio.h>
 #include <string.h>
+#include "esp_timer.h"
 
 
 // 模块头文件
@@ -34,9 +35,6 @@ static const char *TAG = "MAIN";
 
 // 全局状态
 app_state_t g_app_state = {0};
-
-// 配网超时标志
-static bool g_smartconfig_timeout = false;
 
 // ============================================================================
 // UI状态管理
@@ -67,6 +65,14 @@ static const int s_reminder_options_count = sizeof(s_reminder_options) / sizeof(
 static int s_reminder_option_index = 1; // 默认选中60分钟
 static bool s_reminder_enabled = false;
 static bool s_reminder_editing = false;
+
+// 喝水提醒定时器
+static esp_timer_handle_t s_reminder_timer = NULL;
+
+static void reminder_timer_callback(void *arg) {
+  ESP_LOGI(TAG, "Drink water reminder triggered!");
+  voice_play(3);
+}
 
 // 主界面目标面板温度预设 (用户设定的是面板温度，水温 ≈ 面板 - 30°C)
 static const int s_temp_presets[] = {60, 70, 80, 90, 100, 110, 120, 130, 141};
@@ -106,10 +112,7 @@ static void wifi_status_callback(bool connected) {
 // 按键3 (GPIO9): 返回/退出 (BACK)
 static void button_event_handler(button_event_t event) {
   ui_screen_t current_screen = lcd_display_get_current_screen();
-  
-  // 每次按键按下都播放第一个音频
-  voice_play(1);
-  
+
   switch (current_screen) {
     // ========================================
     // 主界面
@@ -131,10 +134,13 @@ static void button_event_handler(button_event_t event) {
         bool current_power = temp_control_get_power();
         bool new_power = !current_power;
         temp_control_set_power(new_power);
+        if (new_power) {
+          voice_play(1); // 开始加热语音
+        }
         ESP_LOGI(TAG, "Heating power toggled: %s", new_power ? "ON" : "OFF");
       }
       break;
-      
+
     // ========================================
     // 菜单界面
     // ========================================
@@ -147,9 +153,9 @@ static void button_event_handler(button_event_t event) {
         // 确认键：进入选中的功能界面
         int menu_index = lcd_display_get_menu_index();
         ESP_LOGI(TAG, "Menu select: index=%d", menu_index);
-        
+
         push_screen(current_screen);
-        
+
         switch (menu_index) {
           case 0: // 定时加热
             s_timer_editing = true;
@@ -164,6 +170,11 @@ static void button_event_handler(button_event_t event) {
             s_reminder_editing = true;
             lcd_display_set_screen(UI_SCREEN_REMINDER);
             break;
+          case 3: // WiFi 配网
+            ESP_LOGI(TAG, "Starting SmartConfig from menu");
+            wifi_manager_start_smartconfig();
+            lcd_display_show_config_screen();
+            break;
         }
       } else if (event == BUTTON_EVENT_3_PRESSED) {
         // 返回键：返回主界面
@@ -171,7 +182,7 @@ static void button_event_handler(button_event_t event) {
         lcd_display_set_screen(pop_screen());
       }
       break;
-      
+
     // ========================================
     // 定时加热界面
     // ========================================
@@ -185,6 +196,7 @@ static void button_event_handler(button_event_t event) {
         // 确认键：保存设置
         ESP_LOGI(TAG, "Timer confirmed: %d min", s_timer_minutes);
         s_timer_editing = false;
+        voice_play(2); // 设置成功语音
         // TODO: 启动定时器任务
         // 返回菜单
         lcd_display_set_screen(pop_screen());
@@ -195,7 +207,7 @@ static void button_event_handler(button_event_t event) {
         lcd_display_set_screen(pop_screen());
       }
       break;
-      
+
     // ========================================
     // 预约加热界面
     // ========================================
@@ -222,6 +234,7 @@ static void button_event_handler(button_event_t event) {
           ESP_LOGI(TAG, "Schedule confirmed: %02d:%02d", s_schedule_hour, s_schedule_minute);
           s_schedule_editing = false;
           s_schedule_edit_field = 0;
+          voice_play(2); // 设置成功语音
           // TODO: 设置预约加热任务
           // 返回菜单
           lcd_display_set_screen(pop_screen());
@@ -241,7 +254,7 @@ static void button_event_handler(button_event_t event) {
         }
       }
       break;
-      
+
     // ========================================
     // 喝水提醒界面
     // ========================================
@@ -250,7 +263,7 @@ static void button_event_handler(button_event_t event) {
         // 导航键：切换开关状态或间隔时间
         s_reminder_enabled = !s_reminder_enabled;
         ESP_LOGI(TAG, "Reminder toggled: %s", s_reminder_enabled ? "ON" : "OFF");
-        
+
         // 如果开启，循环切换间隔
         if (s_reminder_enabled) {
           s_reminder_option_index = (s_reminder_option_index + 1) % s_reminder_options_count;
@@ -259,10 +272,30 @@ static void button_event_handler(button_event_t event) {
         }
       } else if (event == BUTTON_EVENT_2_PRESSED) {
         // 确认键：保存设置
-        ESP_LOGI(TAG, "Reminder confirmed: %s, interval=%d min", 
+        ESP_LOGI(TAG, "Reminder confirmed: %s, interval=%d min",
                  s_reminder_enabled ? "ON" : "OFF", s_reminder_interval);
         s_reminder_editing = false;
-        // TODO: 启动/停止提醒任务
+
+        // 停止已有定时器
+        if (s_reminder_timer != NULL) {
+          esp_timer_stop(s_reminder_timer);
+          esp_timer_delete(s_reminder_timer);
+          s_reminder_timer = NULL;
+        }
+
+        // 如果开启，启动周期定时器
+        if (s_reminder_enabled) {
+          esp_timer_create_args_t timer_args = {
+            .callback = reminder_timer_callback,
+            .name = "reminder"
+          };
+          esp_timer_create(&timer_args, &s_reminder_timer);
+          uint64_t interval_us = (uint64_t)s_reminder_interval * 60 * 1000000;
+          esp_timer_start_periodic(s_reminder_timer, interval_us);
+          voice_play(2); // 设置成功语音
+          ESP_LOGI(TAG, "Reminder timer started: every %d min", s_reminder_interval);
+        }
+
         // 返回菜单
         lcd_display_set_screen(pop_screen());
       } else if (event == BUTTON_EVENT_3_PRESSED) {
@@ -272,14 +305,18 @@ static void button_event_handler(button_event_t event) {
         lcd_display_set_screen(pop_screen());
       }
       break;
-      
+
     // ========================================
-    // 配网界面（不响应按键）
+    // 配网界面
     // ========================================
     case UI_SCREEN_CONFIG:
-      // 配网期间暂不响应按键
+      if (event == BUTTON_EVENT_3_PRESSED) {
+        // 返回键：退出配网，返回菜单
+        ESP_LOGI(TAG, "Exiting config screen");
+        lcd_display_set_screen(pop_screen());
+      }
       break;
-      
+
     default:
       break;
   }
@@ -302,18 +339,9 @@ static void ui_update_task(void *arg) {
     g_app_state.target_temp = target_temp;
     g_app_state.is_heating = is_heating;
 
-    // 如果正在配网且未超时，显示配网界面
-    if (!wifi_ok && !g_smartconfig_timeout && 
-        lcd_display_get_current_screen() != UI_SCREEN_CONFIG) {
-      lcd_display_show_config_screen();
-    } else if (wifi_ok &&
-               lcd_display_get_current_screen() == UI_SCREEN_CONFIG) {
-      // 配网成功，切换到主界面
-      lcd_display_set_screen(UI_SCREEN_MAIN);
-    } else if (!wifi_ok && g_smartconfig_timeout &&
-               lcd_display_get_current_screen() == UI_SCREEN_CONFIG) {
-      // 配网超时，切换到主界面（即使WiFi未连接）
-      ESP_LOGI(TAG, "SmartConfig timeout, switching to main screen");
+    // 配网成功后自动跳回主界面
+    if (wifi_ok && lcd_display_get_current_screen() == UI_SCREEN_CONFIG) {
+      ESP_LOGI(TAG, "WiFi connected, leaving config screen");
       lcd_display_set_screen(UI_SCREEN_MAIN);
     }
 
@@ -323,31 +351,31 @@ static void ui_update_task(void *arg) {
       case UI_SCREEN_MAIN:
         lcd_display_update_main(current_temp, target_temp, is_heating, wifi_ok);
         break;
-        
+
       case UI_SCREEN_MENU: {
         int menu_index = lcd_display_get_menu_index();
         lcd_display_show_menu(menu_index);
         break;
       }
-      
+
       case UI_SCREEN_TIMER:
         lcd_display_show_timer(s_timer_minutes, s_timer_editing);
         break;
-        
+
       case UI_SCREEN_SCHEDULE:
-        lcd_display_show_schedule(s_schedule_hour, s_schedule_minute, 
+        lcd_display_show_schedule(s_schedule_hour, s_schedule_minute,
                                   s_schedule_editing, s_schedule_edit_field);
         break;
-        
+
       case UI_SCREEN_REMINDER:
-        lcd_display_show_reminder(s_reminder_interval, s_reminder_enabled, 
+        lcd_display_show_reminder(s_reminder_interval, s_reminder_enabled,
                                  s_reminder_editing);
         break;
-        
+
       case UI_SCREEN_CONFIG:
         // 配网界面已由上面的逻辑处理
         break;
-        
+
       default:
         break;
     }
@@ -426,36 +454,14 @@ void app_main(void) {
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Voice module init failed!");
   } else {
-    ESP_LOGI(TAG, "[6.5/8] Voice module initialized (CH7800, GPIO1)");
+    ESP_LOGI(TAG, "[6.5/8] Voice module initialized (CH7800, IO mode: GPIO1/18/19)");
   }
 
-  // 7. 显示配网界面
-  lcd_display_show_config_screen();
-
-  // 8. 初始化WiFi (会自动从NVS恢复或启动SmartConfig)
+  // 7. 初始化WiFi (尝试用已保存的凭证连接，不自动配网)
   ESP_LOGI(TAG, "[7/8] Starting WiFi...");
   ret = wifi_manager_init(wifi_status_callback);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "WiFi init failed!");
-  }
-
-  // 等待WiFi连接 (最多30秒)
-  ESP_LOGI(TAG, "Waiting for WiFi connection...");
-  for (int i = 0; i < 60; i++) {
-    if (wifi_manager_is_connected()) {
-      break;
-    }
-    vTaskDelay(pdMS_TO_TICKS(500));
-  }
-
-  if (wifi_manager_is_connected()) {
-    char ip_str[16];
-    wifi_manager_get_ip_string(ip_str);
-    ESP_LOGI(TAG, "[8/8] WiFi connected! IP: %s", ip_str);
-    ESP_LOGI(TAG, "Access via: http://heated-cup.local or http://%s", ip_str);
-  } else {
-    ESP_LOGW(TAG, "WiFi not connected after 30s, SmartConfig timeout");
-    g_smartconfig_timeout = true; // 设置超时标志
   }
 
   // 9. 启动温控任务
@@ -482,12 +488,12 @@ void app_main(void) {
     // 可以在这里添加看门狗喂狗、状态打印等
     float current_temp = temp_control_get_current_temp();
     bool is_heating = temp_control_is_heating();
-    
+
     ESP_LOGI(TAG, "========= Status Monitor =========");
-    ESP_LOGI(TAG, "Temperature: %.1f°C (Panel Target: %d°C, Water: ~%.0f°C)", 
+    ESP_LOGI(TAG, "Temperature: %.1f°C (Panel Target: %d°C, Water: ~%.0f°C)",
              current_temp, temp_control_get_target_temp(),
              current_temp - 30.0f > 0 ? current_temp - 30.0f : 0.0f);
-    ESP_LOGI(TAG, "Heater: %s (Dynamic Target Mode)", 
+    ESP_LOGI(TAG, "Heater: %s (Dynamic Target Mode)",
              is_heating ? "ON " : "OFF");
     ESP_LOGI(TAG, "==================================");
   }

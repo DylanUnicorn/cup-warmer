@@ -22,7 +22,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.1
+    version: 5.5.3
   lovyan03/LovyanGFX:
     component_hash: 43e94edb0e07946cdd31685a5836cbfbf4cd1e5093547578f4cf4c227ee29108
     dependencies: []

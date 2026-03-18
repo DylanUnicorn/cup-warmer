@@ -128,6 +128,7 @@ static MenuItem menuItems[] = {
     {"定时加热", "设置加热时长"},
     {"预约加热", "设置加热时间"},
     {"喝水提醒", "间隔提醒"},
+    {"WiFi配网", "SmartConfig"},
 };
 static const int menuCount = sizeof(menuItems) / sizeof(menuItems[0]);
 static int s_menu_index = 0; // 当前菜单选中索引

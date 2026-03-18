@@ -257,13 +257,26 @@ esp_err_t wifi_manager_init(wifi_event_callback_t callback) {
   ESP_ERROR_CHECK(esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID,
                                              &wifi_event_handler, NULL));
 
-  // 按照用户要求：每次启动都清除旧凭证并进入配网模式
-  wifi_manager_clear_credentials();
-
-  ESP_LOGI(TAG, "Resetting WiFi: Always starting SmartConfig on boot");
+  // 启动 WiFi STA 模式
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-  ESP_ERROR_CHECK(esp_wifi_start());
-  wifi_manager_start_smartconfig();
+
+  // 尝试从 NVS 读取已保存的凭证
+  char ssid[33] = {0};
+  char password[65] = {0};
+  esp_err_t load_err = load_wifi_credentials(ssid, sizeof(ssid), password, sizeof(password));
+
+  if (load_err == ESP_OK && strlen(ssid) > 0) {
+    ESP_LOGI(TAG, "Found saved WiFi credentials, connecting to: %s", ssid);
+    wifi_config_t wifi_config = {0};
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_connect();
+  } else {
+    ESP_LOGI(TAG, "No saved WiFi credentials, starting in STA mode (idle)");
+    ESP_ERROR_CHECK(esp_wifi_start());
+  }
 
   return ESP_OK;
 }
